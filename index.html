@@ -302,566 +302,161 @@
 <div class="toast" id="toast"></div>
 
 <script>
-// ═══════════════════════════════════════════════════════════
-// STATE — all stored as plain JS Arrays (linear DS)
-// ═══════════════════════════════════════════════════════════
-let holdings = [];    // Array of holding objects
-let allFunds  = [];   // Array of {schemeCode, schemeName} — fetched once
-let alerts    = [];   // Array of alert objects
-let navChart  = null;
-let allocChart= null;
-let historyPeriod = 180;
-let selectedHistoryFund = null;
+// STATE
+let holdings = [];
+let allFunds  = [];
+let alerts    = [];
 
-const API = "https://api.allorigins.win/raw?url=https://api.mfapi.in";
+const AMFI_URL = "https://www.amfiindia.com/spages/NAVAll.txt";
 
-// ── Persist to localStorage ──────────────────────────────
+// STORAGE
 function save(){
   localStorage.setItem('mf_holdings', JSON.stringify(holdings));
-  localStorage.setItem('mf_alerts', JSON.stringify(alerts));
 }
 function load(){
   try{ holdings = JSON.parse(localStorage.getItem('mf_holdings')||'[]'); } catch(e){ holdings=[]; }
-  try{ alerts   = JSON.parse(localStorage.getItem('mf_alerts')||'[]');   } catch(e){ alerts=[];   }
 }
 
-// ── Toast ────────────────────────────────────────────────
-function toast(msg, dur=2800){
-  const t = document.getElementById('toast');
-  t.textContent = msg; t.classList.add('show');
-  setTimeout(()=>t.classList.remove('show'), dur);
+// TOAST
+function toast(msg){
+  console.log(msg);
 }
 
-// ── Page navigation ──────────────────────────────────────
-function showPage(id){
-  document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
-  document.querySelectorAll('.nav-tab').forEach(t=>t.classList.remove('active'));
-  document.getElementById('page-'+id).classList.add('active');
-  event.target.classList.add('active');
-  if(id==='portfolio'){ renderHoldingsTable(); renderAllocChart(); }
-  if(id==='alerts'){ renderAlertList(); renderTriggeredList(); }
-  if(id==='history'){ renderHistoryHoldingsList(); }
-}
-
-// ═══════════════════════════════════════════════════════════
-// FETCH ALL FUNDS (loaded once, used for linear search)
-// ═══════════════════════════════════════════════════════════
+// ==============================
+// FETCH ALL FUNDS (AMFI)
+// ==============================
 async function fetchAllFunds(){
   if(allFunds.length > 0) return;
+
   try{
-    const r = await fetch(`${API}/mf`);
-    const data = await r.json();
-    allFunds = data; // Array of {schemeCode, schemeName}
-  } catch(e){ toast('⚠️ Could not load fund list. Check network.'); }
+    const res = await fetch(AMFI_URL);
+    const text = await res.text();
+
+    const lines = text.split("\n");
+
+    allFunds = lines
+      .map(line => {
+        const parts = line.split(";");
+        return {
+          schemeCode: parts[0],
+          schemeName: parts[3],
+          nav: parseFloat(parts[4])
+        };
+      })
+      .filter(f => f.schemeName && f.schemeCode);
+
+    console.log("Funds loaded:", allFunds.length);
+
+  } catch(e){
+    console.error("Fetch failed:", e);
+    toast("Failed to load funds");
+  }
 }
 
-// ═══════════════════════════════════════════════════════════
-// LIVE NAV FETCH
-// ═══════════════════════════════════════════════════════════
+// ==============================
+// NAV (from same dataset)
+// ==============================
 async function fetchLatestNAV(schemeCode){
-  const r = await fetch(`${API}/mf/${schemeCode}/latest`);
-  const d = await r.json();
-  return parseFloat(d.data[0].nav);
+  await fetchAllFunds();
+
+  const fund = allFunds.find(f => f.schemeCode == schemeCode);
+  if(!fund) throw new Error("Fund not found");
+
+  return fund.nav;
 }
 
-async function fetchNAVHistory(schemeCode){
-  const r = await fetch(`${API}/mf/${schemeCode}`);
-  const d = await r.json();
-  // API returns array newest-first; reverse for chart
-  return d.data.reverse(); // Array of {date, nav}
-}
-
-// ═══════════════════════════════════════════════════════════
-// PORTFOLIO — ADD / REFRESH
-// ═══════════════════════════════════════════════════════════
+// ==============================
+// LIVE SEARCH (FIXED)
+// ==============================
 let addSelectedFund = null;
 
 async function liveAddSearch(){
   await fetchAllFunds();
-  const q = document.getElementById('addFundSearch').value.trim().toLowerCase();
+
+  const q = document.getElementById('addFundSearch').value.toLowerCase();
   const box = document.getElementById('addSuggestions');
-  if(q.length < 2){ box.innerHTML=''; return; }
-  // Linear search: .filter() on allFunds array — O(n)
-  const results = allFunds.filter(f => f.schemeName.toLowerCase().includes(q)).slice(0,6);
-  box.innerHTML = results.map(f=>`
-    <div class="result-item" style="border-top:1px solid var(--border);background:var(--card2);" onclick="selectAddFund(${f.schemeCode},'${f.schemeName.replace(/'/g,"\\'")}')">
-      <div>
-        <div class="result-name">${highlight(f.schemeName, q)}</div>
-        <div class="result-meta">Code: ${f.schemeCode}</div>
-      </div>
-    </div>`).join('') || `<div style="padding:10px 14px;color:var(--muted);font-size:13px;">No results</div>`;
+
+  if(q.length < 2){
+    box.innerHTML = '';
+    return;
+  }
+
+  const results = allFunds
+    .filter(f => f.schemeName.toLowerCase().includes(q))
+    .slice(0,6);
+
+  box.innerHTML = results.map(f => `
+    <div onclick="selectAddFund('${f.schemeCode}','${f.schemeName}')"
+         style="padding:8px;border-bottom:1px solid #333;cursor:pointer;">
+      ${f.schemeName}
+    </div>
+  `).join('');
 }
 
 function selectAddFund(code, name){
   addSelectedFund = {schemeCode:code, schemeName:name};
   document.getElementById('addFundSearch').value = name;
-  document.getElementById('addSuggestions').innerHTML='';
+  document.getElementById('addSuggestions').innerHTML = '';
 }
 
+// ==============================
+// ADD HOLDING
+// ==============================
 async function addHolding(){
-  if(!addSelectedFund){ toast('Please select a fund from the dropdown.'); return; }
-  const units   = parseFloat(document.getElementById('addUnits').value);
-  const avgNav  = parseFloat(document.getElementById('addAvgNav').value);
-  if(!units || !avgNav){ toast('Enter valid units and avg buy NAV.'); return; }
-
-  toast('Fetching live NAV… ⏳', 4000);
-  try{
-    const liveNav = await fetchLatestNAV(addSelectedFund.schemeCode);
-    // Push new object into holdings array
-    holdings.push({
-      schemeCode: addSelectedFund.schemeCode,
-      name: addSelectedFund.schemeName,
-      units, avgNav, liveNav,
-      invested: units * avgNav,
-      currentVal: units * liveNav,
-      pnl: units * (liveNav - avgNav),
-      pnlPct: ((liveNav - avgNav) / avgNav) * 100
-    });
-    save();
-    renderHoldingsTable();
-    renderAllocChart();
-    updateKPIs();
-    document.getElementById('addFundSearch').value='';
-    document.getElementById('addUnits').value='';
-    document.getElementById('addAvgNav').value='';
-    addSelectedFund=null;
-    toast('✅ Added to portfolio!');
-    document.getElementById('lastUpdated').textContent = 'Updated: '+new Date().toLocaleTimeString();
-  } catch(e){ toast('❌ Could not fetch NAV. Try again.'); }
-}
-
-async function refreshAllNAV(){
-  if(!holdings.length){ toast('No holdings to refresh.'); return; }
-  toast('Refreshing all NAVs… ⏳', 5000);
-  // Array traversal with async map
-  await Promise.all(holdings.map(async h => {
-    try{
-      h.liveNav    = await fetchLatestNAV(h.schemeCode);
-      h.currentVal = h.units * h.liveNav;
-      h.pnl        = h.units * (h.liveNav - h.avgNav);
-      h.pnlPct     = ((h.liveNav - h.avgNav) / h.avgNav) * 100;
-    } catch(e){}
-  }));
-  save();
-  renderHoldingsTable();
-  renderAllocChart();
-  updateKPIs();
-  toast('✅ NAVs refreshed!');
-  document.getElementById('lastUpdated').textContent = 'Updated: '+new Date().toLocaleTimeString();
-}
-
-function removeHolding(idx){
-  holdings.splice(idx,1); // Array splice — O(n)
-  save();
-  renderHoldingsTable();
-  renderAllocChart();
-  updateKPIs();
-  toast('Holding removed.');
-}
-
-// ── Sort the holdings array using JS .sort() ──────────────
-function getSortedHoldings(){
-  const key = document.getElementById('sortKey').value;
-  // Timsort under the hood — O(n log n)
-  return [...holdings].sort((a,b)=>{
-    if(key==='name')           return a.name.localeCompare(b.name);
-    if(key==='pnlPct_desc')    return b.pnlPct - a.pnlPct;
-    if(key==='pnlPct_asc')     return a.pnlPct - b.pnlPct;
-    if(key==='currentVal_desc')return b.currentVal - a.currentVal;
-    if(key==='nav_desc')       return b.liveNav - a.liveNav;
-    return 0;
-  });
-}
-
-// ── Render holdings as 2D array → HTML table ─────────────
-function renderHoldingsTable(){
-  const body = document.getElementById('holdingsBody');
-  document.getElementById('holdingsBadge').textContent = holdings.length+' funds';
-  document.getElementById('kpiCount').textContent = holdings.length;
-
-  if(!holdings.length){
-    body.innerHTML='<div class="empty"><div class="icon">💼</div>No holdings yet.</div>';
+  if(!addSelectedFund){
+    toast("Select fund first");
     return;
   }
-  const sorted = getSortedHoldings();
-  // 2D array: rows = funds, cols = [name, units, avgNav, liveNav, invested, currentVal, pnl, pnlPct, action]
-  body.innerHTML = `<table>
-    <thead><tr>
-      <th onclick="cycleSortKey('name')">Fund Name ↕</th>
-      <th>Units</th>
-      <th>Avg NAV (₹)</th>
-      <th>Live NAV (₹)</th>
-      <th onclick="cycleSortKey('currentVal_desc')">Current Value ↕</th>
-      <th onclick="cycleSortKey('pnlPct_desc')">P&L ↕</th>
-      <th>P&L %</th>
-      <th></th>
-    </tr></thead>
-    <tbody>
-    ${sorted.map((h,i)=>`<tr>
-      <td style="max-width:240px;font-weight:500;">${h.name}</td>
-      <td>${h.units.toFixed(3)}</td>
-      <td>₹${h.avgNav.toFixed(2)}</td>
-      <td>₹${h.liveNav.toFixed(2)}</td>
-      <td>₹${h.currentVal.toFixed(2)}</td>
-      <td class="${h.pnl>=0?'green':'red'}">₹${h.pnl.toFixed(2)}</td>
-      <td><span class="chip ${h.pnlPct>=0?'chip-green':'chip-red'}">${h.pnlPct>=0?'+':''}${h.pnlPct.toFixed(2)}%</span></td>
-      <td>
-        <button class="ghost" style="padding:4px 8px;font-size:11px;" onclick="viewFundHistory(${h.schemeCode},'${h.name.replace(/'/g,"\\'")}')" title="View history">📈</button>
-        <button class="danger" style="padding:4px 8px;font-size:11px;margin-left:4px;" onclick="removeHolding(${holdings.indexOf(h)})" title="Remove">✕</button>
-      </td>
-    </tr>`).join('')}
-    </tbody></table>`;
-  updateKPIs();
-}
 
-function cycleSortKey(key){
-  document.getElementById('sortKey').value = key;
-  renderHoldingsTable();
-}
+  const units  = parseFloat(document.getElementById('addUnits').value);
+  const avgNav = parseFloat(document.getElementById('addAvgNav').value);
 
-// ── KPI computation: array.reduce() ──────────────────────
-function updateKPIs(){
-  // reduce() traverses the entire array once — O(n)
-  const invested   = holdings.reduce((s,h)=>s+h.invested,   0);
-  const currentVal = holdings.reduce((s,h)=>s+h.currentVal, 0);
-  const pnl        = currentVal - invested;
-  const pnlPct     = invested ? (pnl/invested*100) : 0;
+  if(!units || !avgNav){
+    toast("Invalid input");
+    return;
+  }
 
-  document.getElementById('kpiInvested').textContent = '₹'+fmt(invested);
-  document.getElementById('kpiCurrent').textContent  = '₹'+fmt(currentVal);
-  const pnlEl = document.getElementById('kpiPnl');
-  pnlEl.textContent = (pnl>=0?'+':'')+' ₹'+fmt(pnl)+' ('+pnlPct.toFixed(2)+'%)';
-  pnlEl.className   = 'val '+(pnl>=0?'green':'red');
-}
+  const nav = await fetchLatestNAV(addSelectedFund.schemeCode);
 
-function fmt(n){ return n.toLocaleString('en-IN',{maximumFractionDigits:0}); }
-
-// ── Allocation Doughnut Chart ─────────────────────────────
-function renderAllocChart(){
-  const ctx = document.getElementById('allocChart');
-  if(allocChart) allocChart.destroy();
-  if(!holdings.length){ return; }
-  const labels = holdings.map(h=>h.name.split(' ').slice(0,3).join(' '));
-  const values = holdings.map(h=>h.currentVal);
-  const colors = ['#1E4DB7','#00C2FF','#10B981','#FFB800','#EF4444','#8B5CF6','#F59E0B','#06B6D4'];
-  allocChart = new Chart(ctx,{
-    type:'doughnut',
-    data:{ labels, datasets:[{ data:values, backgroundColor:colors.slice(0,holdings.length), borderWidth:0 }] },
-    options:{
-      responsive:true, maintainAspectRatio:false,
-      plugins:{ legend:{ labels:{ color:'#94A3B8', font:{size:11} } } }
-    }
+  holdings.push({
+    schemeCode: addSelectedFund.schemeCode,
+    name: addSelectedFund.schemeName,
+    units,
+    avgNav,
+    liveNav: nav,
+    invested: units * avgNav,
+    currentVal: units * nav
   });
-}
 
-// ═══════════════════════════════════════════════════════════
-// FUND SEARCH — linear .filter() on allFunds array
-// ═══════════════════════════════════════════════════════════
-let searchTimer = null;
-function searchFunds(){
-  clearTimeout(searchTimer);
-  searchTimer = setTimeout(async ()=>{
-    await fetchAllFunds();
-    const q    = document.getElementById('searchInput').value.trim().toLowerCase();
-    const cat  = document.getElementById('categoryFilter').value.toLowerCase();
-    const sort = document.getElementById('sortSearch').value;
-    const box  = document.getElementById('searchResults');
-    const stat = document.getElementById('searchStatus');
-
-    if(q.length < 2 && !cat){
-      box.innerHTML='<div class="empty"><div class="icon">🔎</div>Type to search from 1,500+ funds</div>';
-      stat.textContent=''; return;
-    }
-
-    // Linear search: .filter() — O(n)
-    let results = allFunds.filter(f=>{
-      const nameMatch = !q || f.schemeName.toLowerCase().includes(q);
-      const catMatch  = !cat || f.schemeName.toLowerCase().includes(cat);
-      return nameMatch && catMatch;
-    }).slice(0,50);
-
-    // Sort results array
-    if(sort==='name') results = results.sort((a,b)=>a.schemeName.localeCompare(b.schemeName));
-
-    stat.textContent = `${results.length} results (linear scan of ${allFunds.length} funds)`;
-    if(!results.length){
-      box.innerHTML='<div class="empty"><div class="icon">🔎</div>No results found</div>';
-      return;
-    }
-    box.innerHTML = results.map(f=>`
-      <div class="result-item">
-        <div>
-          <div class="result-name">${highlight(f.schemeName, q)}</div>
-          <div class="result-meta">Code: ${f.schemeCode}</div>
-        </div>
-        <div style="display:flex;gap:8px;">
-          <button class="ghost" style="font-size:11px;padding:4px 10px;" onclick="viewFundHistory(${f.schemeCode},'${f.schemeName.replace(/'/g,"\\'")}')" >📈 History</button>
-          <button style="font-size:11px;padding:4px 10px;" onclick="prefillAdd(${f.schemeCode},'${f.schemeName.replace(/'/g,"\\'")}')">+ Add</button>
-        </div>
-      </div>`).join('');
-  }, 300);
-}
-
-function prefillAdd(code, name){
-  addSelectedFund = {schemeCode:code, schemeName:name};
-  document.getElementById('addFundSearch').value = name;
-  showPage('portfolio');
-  document.querySelectorAll('.nav-tab')[0].classList.add('active');
-  document.querySelectorAll('.nav-tab').forEach((t,i)=>{ if(i>0)t.classList.remove('active');});
-  toast('Fund selected. Enter units & avg NAV to add.');
-}
-
-// ═══════════════════════════════════════════════════════════
-// NAV HISTORY — array of {date,nav} → Chart.js
-// ═══════════════════════════════════════════════════════════
-let historySearchResults = [];
-let historySearchTimer = null;
-
-function historyLiveSearch(){
-  clearTimeout(historySearchTimer);
-  historySearchTimer = setTimeout(async ()=>{
-    await fetchAllFunds();
-    const q = document.getElementById('historySearch').value.trim().toLowerCase();
-    const box = document.getElementById('historyFundList');
-    if(q.length < 2){ box.innerHTML=''; return; }
-    historySearchResults = allFunds.filter(f=>f.schemeName.toLowerCase().includes(q)).slice(0,6);
-    box.innerHTML = historySearchResults.map(f=>`
-      <div class="result-item" style="background:var(--card2);" onclick="selectHistoryFund(${f.schemeCode},'${f.schemeName.replace(/'/g,"\\'")}')">
-        <div class="result-name">${highlight(f.schemeName, q)}</div>
-        <div class="result-meta">Code: ${f.schemeCode}</div>
-      </div>`).join('');
-  }, 300);
-}
-
-function selectHistoryFund(code, name){
-  selectedHistoryFund = {schemeCode:code, schemeName:name};
-  document.getElementById('historySearch').value = name;
-  document.getElementById('historyFundList').innerHTML='';
-}
-
-async function loadHistory(){
-  if(!selectedHistoryFund){ toast('Select a fund first.'); return; }
-  toast('Loading NAV history… ⏳', 4000);
-  try{
-    const raw = await fetchNAVHistory(selectedHistoryFund.schemeCode);
-    // raw is an Array; slice last N items for period
-    const slice = raw.slice(-historyPeriod);
-    drawNavChart(slice, selectedHistoryFund.schemeName);
-  } catch(e){ toast('❌ Could not fetch history.'); }
-}
-
-function setHistoryPeriod(days, btn){
-  historyPeriod = days;
-  document.querySelectorAll('.period-btn').forEach(b=>b.classList.remove('active'));
-  btn.classList.add('active');
-  if(selectedHistoryFund) loadHistory();
-}
-
-function drawNavChart(data, title){
-  const ctx = document.getElementById('navChart');
-  if(navChart) navChart.destroy();
-  // .map() on the array to extract labels and values — O(n)
-  const labels = data.map(d=>d.date);
-  const values = data.map(d=>parseFloat(d.nav));
-  const minNav = Math.min(...values), maxNav = Math.max(...values);
-  const change = ((values[values.length-1]-values[0])/values[0]*100).toFixed(2);
-  document.getElementById('historyStats').textContent =
-    `Min: ₹${minNav.toFixed(2)}  Max: ₹${maxNav.toFixed(2)}  Change: ${change>0?'+':''}${change}%  |  ${data.length} data points`;
-
-  navChart = new Chart(ctx,{
-    type:'line',
-    data:{
-      labels,
-      datasets:[{
-        label: title,
-        data: values,
-        borderColor: change>=0 ? '#10B981' : '#EF4444',
-        backgroundColor: change>=0 ? 'rgba(16,185,129,0.07)' : 'rgba(239,68,68,0.07)',
-        borderWidth:2, pointRadius:0, tension:0.3, fill:true
-      }]
-    },
-    options:{
-      responsive:true, maintainAspectRatio:false,
-      plugins:{ legend:{ labels:{ color:'#94A3B8' } } },
-      scales:{
-        x:{ ticks:{ color:'#475569', maxTicksLimit:8 }, grid:{ color:'#1E3060' } },
-        y:{ ticks:{ color:'#475569' }, grid:{ color:'#1E3060' } }
-      }
-    }
-  });
-}
-
-function viewFundHistory(code, name){
-  selectedHistoryFund = {schemeCode:code, schemeName:name};
-  document.getElementById('historySearch').value = name;
-  showPage('history');
-  document.querySelectorAll('.nav-tab').forEach((t,i)=>t.classList.toggle('active',i===2));
-  loadHistory();
-}
-
-function renderHistoryHoldingsList(){
-  const box = document.getElementById('historyHoldingsList');
-  if(!holdings.length){ box.innerHTML='<div class="empty"><div class="icon">💼</div>Add holdings first.</div>'; return; }
-  box.innerHTML = holdings.map(h=>`
-    <div class="result-item" onclick="viewFundHistory(${h.schemeCode},'${h.name.replace(/'/g,"\\'")}')" >
-      <div><div class="result-name">${h.name}</div></div>
-      <button style="font-size:11px;padding:4px 10px;">📈 View</button>
-    </div>`).join('');
-}
-
-// ═══════════════════════════════════════════════════════════
-// ALERTS — .filter() on holdings/alerts arrays
-// ═══════════════════════════════════════════════════════════
-let alertSelectedFund = null;
-
-async function alertLiveSearch(){
-  await fetchAllFunds();
-  const q = document.getElementById('alertFundSearch').value.trim().toLowerCase();
-  const box = document.getElementById('alertSuggestions');
-  if(q.length < 2){ box.innerHTML=''; return; }
-  const res = allFunds.filter(f=>f.schemeName.toLowerCase().includes(q)).slice(0,5);
-  box.innerHTML = res.map(f=>`
-    <div class="result-item" style="background:var(--card2);" onclick="selectAlertFund(${f.schemeCode},'${f.schemeName.replace(/'/g,"\\'")}')">
-      <div class="result-name">${highlight(f.schemeName,q)}</div>
-    </div>`).join('');
-}
-
-function selectAlertFund(code, name){
-  alertSelectedFund = {schemeCode:code, schemeName:name};
-  document.getElementById('alertFundSearch').value = name;
-  document.getElementById('alertSuggestions').innerHTML='';
-}
-
-async function addAlert(){
-  if(!alertSelectedFund){ toast('Select a fund first.'); return; }
-  const floor = parseFloat(document.getElementById('alertFloor').value)||null;
-  const ceil  = parseFloat(document.getElementById('alertCeil').value)||null;
-  if(!floor && !ceil){ toast('Set at least one threshold.'); return; }
-  toast('Fetching live NAV… ⏳',3000);
-  try{
-    const liveNav = await fetchLatestNAV(alertSelectedFund.schemeCode);
-    alerts.push({ schemeCode:alertSelectedFund.schemeCode, name:alertSelectedFund.schemeName, floor, ceil, liveNav });
-    save();
-    renderAlertList();
-    renderTriggeredList();
-    document.getElementById('alertFundSearch').value='';
-    document.getElementById('alertFloor').value='';
-    document.getElementById('alertCeil').value='';
-    alertSelectedFund=null;
-    toast('✅ Alert set!');
-  } catch(e){ toast('❌ Could not fetch NAV.'); }
-}
-
-function removeAlert(idx){
-  alerts.splice(idx,1);
   save();
-  renderAlertList();
-  renderTriggeredList();
+  renderHoldings();
 }
 
-async function checkAlerts(){
-  if(!alerts.length){ toast('No alerts to check.'); return; }
-  toast('Checking NAVs… ⏳',4000);
-  await Promise.all(alerts.map(async a=>{
-    try{ a.liveNav = await fetchLatestNAV(a.schemeCode); } catch(e){}
-  }));
-  save();
-  renderAlertList();
-  renderTriggeredList();
-  toast('✅ Alerts checked!');
+// ==============================
+// RENDER
+// ==============================
+function renderHoldings(){
+  const box = document.getElementById("holdingsBody");
+
+  if(!holdings.length){
+    box.innerHTML = "No holdings";
+    return;
+  }
+
+  box.innerHTML = holdings.map(h => `
+    <div style="padding:8px;border-bottom:1px solid #333;">
+      ${h.name} — ₹${h.liveNav}
+    </div>
+  `).join('');
 }
 
-function renderAlertList(){
-  const box = document.getElementById('alertList');
-  document.getElementById('alertBadge').textContent = alerts.length;
-  if(!alerts.length){ box.innerHTML='<div class="empty"><div class="icon">🔔</div>No alerts set.</div>'; return; }
-  box.innerHTML = alerts.map((a,i)=>`
-    <div class="alert-item">
-      <div style="flex:1;">
-        <div style="font-size:13px;font-weight:500;">${a.name}</div>
-        <div style="font-size:11px;color:var(--muted);margin-top:2px;">
-          Live: ₹${a.liveNav?.toFixed(2)||'—'}
-          ${a.floor ? ' · Floor: ₹'+a.floor : ''}
-          ${a.ceil  ? ' · Ceiling: ₹'+a.ceil : ''}
-        </div>
-      </div>
-      <button class="danger" style="font-size:11px;padding:4px 8px;" onclick="removeAlert(${i})">✕</button>
-    </div>`).join('');
-}
-
-function renderTriggeredList(){
-  // .filter() on alerts array — linear scan O(n)
-  const triggered = alerts.filter(a =>
-    (a.floor && a.liveNav <= a.floor) || (a.ceil && a.liveNav >= a.ceil)
-  );
-  const box = document.getElementById('triggeredList');
-  document.getElementById('triggeredBadge').textContent = triggered.length;
-  if(!triggered.length){ box.innerHTML='<div class="empty"><div class="icon">✅</div>No alerts triggered.</div>'; return; }
-  box.innerHTML = triggered.map(a=>`
-    <div class="alert-item">
-      <div class="alert-dot" style="background:${a.liveNav<=a.floor?'var(--red)':'var(--gold)'}"></div>
-      <div>
-        <div style="font-size:13px;font-weight:600;">${a.name}</div>
-        <div style="font-size:12px;margin-top:2px;">
-          Live NAV: <span style="font-weight:700;">₹${a.liveNav.toFixed(2)}</span>
-          ${a.floor && a.liveNav<=a.floor ? `<span class="chip chip-red" style="margin-left:8px;">⬇ Below ₹${a.floor}</span>` : ''}
-          ${a.ceil  && a.liveNav>=a.ceil  ? `<span class="chip chip-blue" style="margin-left:8px;">⬆ Above ₹${a.ceil}</span>`  : ''}
-        </div>
-      </div>
-    </div>`).join('');
-}
-
-// ═══════════════════════════════════════════════════════════
-// DEMO PORTFOLIO
-// ═══════════════════════════════════════════════════════════
-async function loadDemo(){
-  if(holdings.length && !confirm('Replace existing portfolio with demo?')) return;
-  toast('Loading demo portfolio… ⏳',5000);
-  // Popular Indian MF scheme codes
-  const demo = [
-    { schemeCode:119598, name:'Mirae Asset Large Cap Fund - Direct Growth',    units:200,  avgNav:80 },
-    { schemeCode:120503, name:'Axis Bluechip Fund Direct Plan Growth',          units:150,  avgNav:42 },
-    { schemeCode:125497, name:'Parag Parikh Flexi Cap Fund Direct Growth',     units:100,  avgNav:55 },
-    { schemeCode:120844, name:'SBI Small Cap Fund Direct Growth',               units:80,   avgNav:110 },
-    { schemeCode:118989, name:'HDFC Balanced Advantage Fund Direct Growth',    units:250,  avgNav:65 },
-  ];
-  holdings = [];
-  await Promise.all(demo.map(async d=>{
-    try{
-      const liveNav = await fetchLatestNAV(d.schemeCode);
-      holdings.push({
-        schemeCode:d.schemeCode, name:d.name,
-        units:d.units, avgNav:d.avgNav, liveNav,
-        invested:d.units*d.avgNav,
-        currentVal:d.units*liveNav,
-        pnl:d.units*(liveNav-d.avgNav),
-        pnlPct:((liveNav-d.avgNav)/d.avgNav)*100
-      });
-    } catch(e){}
-  }));
-  save();
-  renderHoldingsTable();
-  renderAllocChart();
-  updateKPIs();
-  document.getElementById('lastUpdated').textContent = 'Updated: '+new Date().toLocaleTimeString();
-  toast('✅ Demo portfolio loaded with live NAVs!');
-}
-
-// ═══════════════════════════════════════════════════════════
-// HELPERS
-// ═══════════════════════════════════════════════════════════
-function highlight(text, q){
-  if(!q) return text;
-  const re = new RegExp(`(${q.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')})`, 'gi');
-  return text.replace(re,'<mark style="background:#1E4DB7;color:#fff;border-radius:2px;padding:0 2px;">$1</mark>');
-}
-
-// ── INIT ──────────────────────────────────────────────────
-load();
-renderHoldingsTable();
-renderAllocChart();
-updateKPIs();
-fetchAllFunds(); // pre-warm array in background
-</script>
-</body>
+// ==============================
+// INIT
+// ==============================
+(async function(){
+  load();
+  await fetchAllFunds(); // preload
+  renderHoldings();
+})();
+</script></body>
 </html>
